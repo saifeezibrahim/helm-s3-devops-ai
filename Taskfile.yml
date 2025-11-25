@@ -1,0 +1,112 @@
+version: "3"
+
+vars:
+  GOCOVERDIR: "{{ .ROOT_DIR }}/output/covdatafiles"
+
+env:
+  GOBIN: "{{ .ROOT_DIR }}/bin"
+  CGO_ENABLED: "0"
+  PLUGIN_VERSION:
+    sh: cat plugin.yaml | grep "version" | cut -d '"' -f 2
+
+tasks:
+  default:
+    desc: "Validate, build, and test the plugin"
+    deps:
+      - mod
+      - lint
+      - test-unit
+      - build
+      - test-e2e
+  mod:
+    desc: "Install dependencies"
+    run: once
+    cmds:
+      - go mod tidy
+  lint:
+    desc: "Run linter"
+    deps:
+      - mod
+    cmds:
+      - golangci-lint run {{ .CLI_ARGS }}
+  test-unit:
+    desc: "Run unit tests"
+    deps:
+      - mod
+    cmds:
+      - go test
+        -coverprofile=output/coverage.unit.out
+        -covermode=count
+        $(go list ./... | grep -v e2e)
+  build:
+    desc: "Build plugin binary"
+    run: once
+    deps:
+      - mod
+    env:
+      PLUGIN_VERSION:
+        sh: date -u +"%Y-%m-%dT%H:%M:%SZ"
+    cmds:
+      - go build
+        -cover
+        -ldflags "-X 'main.version=${PLUGIN_VERSION} (development)'"
+        -o bin/helm-s3
+        ./cmd/helm-s3
+  install:
+    desc: "Install the plugin in development mode"
+    deps:
+      - build
+    env:
+      HELM_S3_PLUGIN_NO_INSTALL_HOOK: "1"
+    cmds:
+      - helm plugin install .
+  test-e2e:
+    desc: "Run end-to-end tests"
+    deps:
+      - build
+    env:
+      GOCOVERDIR: "{{ .GOCOVERDIR }}"
+    cmds:
+      - task: covdata:reset
+      - ./hack/test-e2e-local.sh {{ .CLI_ARGS }}
+      - task: covdata:textfmt
+      - task: covdata:percent
+  setup:
+    desc: "Setup development environment"
+    cmds:
+      - task: setup:install-if-required
+      - task: setup:gpg
+  #
+  # Internal
+  #
+  covdata:reset:
+    internal: true
+    silent: true
+    cmds:
+      - rm -rf {{ .GOCOVERDIR }}
+      - mkdir -p {{ .GOCOVERDIR }}
+  covdata:textfmt:
+    internal: true
+    silent: true
+    cmds:
+      - go tool covdata textfmt -i={{ .GOCOVERDIR }} -o=output/coverage.e2e.out
+  covdata:percent:
+    internal: true
+    silent: true
+    cmds:
+      - go tool covdata percent -i={{ .GOCOVERDIR }}
+  setup:install-if-required:
+    internal: true
+    silent: true
+    cmds:
+      - task: install
+    status:
+      - helm plugin list ls | grep -q -e "^s3"
+  setup:gpg:
+    internal: true
+    silent: true
+    dir: "{{ .ROOT_DIR }}/tests/e2e/testdata"
+    cmds:
+      - ./bootstrap-gnupg.sh
+    status:
+      - test -f "{{ .ROOT_DIR }}/tests/e2e/testdata/gnupg/secring.gpg"
